@@ -246,10 +246,27 @@ actually on the device.
 1. Install LocalDevVPN (App Store id 6755608044), connect it, keep Wi-Fi on.
 2. Build SideInstaller in Xcode (`./build-rust.sh && xcodegen generate`, then
    run on the device with your signing team).
-3. In the app: Generate pairing file (approve the Developer Mode PIN in
-   Settings) → Connect + read device info → enter Apple ID + 2FA → Download
-   SideStore → Sign IPA → Install → Write pairing file. Copy the log for any
-   step that fails — errors are raw (idevice FFI codes + isideload `Report`s).
+3. In the app: type your Apple ID email + password and tap **Install
+   SideStore**. The one-click flow runs every step in order — connect VPN →
+   pair (it shows a PIN to enter + tells you where) → connect → Apple ID sign-in
+   (enter the 2FA code when prompted) → download → sign → install → write
+   pairing file — with a progress bar and a contextual instruction card at each
+   gate. When it finishes, follow the final card to trust the cert
+   (Settings › General › VPN & Device Management) and open SideStore.
+4. If a step stops, the card shows a plain-English reason; open **Advanced** to
+   run any step individually and **Copy** the raw log (idevice FFI codes +
+   isideload `Report`s) for debugging.
+
+### UI (friend-ready)
+
+The raw test harness was replaced by a guided installer (`ContentView.swift`):
+one primary **Install SideStore** button drives the whole `Engine.runOneClick()`
+orchestrator; per-step buttons + the log console moved into a collapsible
+**Advanced** section. The one-click path and the per-step buttons call the same
+async step cores in `Engine`, so they can never drift. State for the progress
+bar/checklist (`Engine.stepStates`, `installProgress`, `pairingPIN`, `guide`)
+is all `@Published`. Reused-pairing/sign-in/download are skipped when already
+valid; a stale pairing file triggers one automatic re-pair before giving up.
 
 ## Honest status summary
 

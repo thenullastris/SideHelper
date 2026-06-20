@@ -26,14 +26,62 @@ final class PairingController {
 
     private var running = false
 
+    /// Resolved when an awaited (`startAndWait`) pairing finishes. Nil for the
+    /// fire-and-forget `start()` path used by the Advanced section.
+    private var pairContinuation: CheckedContinuation<String, Error>?
+
     private var engine: Engine { Engine.shared }
 
     private init() {}
+
+    /// Errors surfaced by the awaitable pairing API.
+    enum PairingError: LocalizedError {
+        case busy
+        case localNetworkDenied
+        case zeroBytes
+        case failed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .busy:
+                return "Pairing is already in progress."
+            case .localNetworkDenied:
+                return "Local Network permission is off. Enable it in Settings › SideInstaller › Local Network, then try again."
+            case .zeroBytes:
+                return "Pairing produced an empty file. Make sure you approved the pairing request, then try again."
+            case let .failed(message):
+                return message
+            }
+        }
+    }
 
     /// Pairing file destination (also read back when writing into SideStore).
     nonisolated static func pairingFilePath() -> String {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return docs.appendingPathComponent("rp_pairing_file.plist").path
+    }
+
+    /// Awaitable pairing for the one-click orchestrator: starts the host and
+    /// resolves with the pairing-file path on success, or throws on failure.
+    func startAndWait() async throws -> String {
+        if running { throw PairingError.busy }
+        return try await withCheckedThrowingContinuation { cont in
+            pairContinuation = cont
+            start()
+        }
+    }
+
+    /// Best-effort cancel for the awaited path: unblocks the orchestrator. The
+    /// underlying host thread ends when `si_pairing_run_host` returns; `finish`
+    /// then no-ops on the (already-cleared) continuation.
+    func softCancel() {
+        resolve(.failure(CancellationError()))
+    }
+
+    private func resolve(_ result: Result<String, Error>) {
+        guard let cont = pairContinuation else { return }
+        pairContinuation = nil
+        cont.resume(with: result)
     }
 
     func start() {
@@ -50,6 +98,7 @@ final class PairingController {
                 engine.log("RPPairing: Local Network permission DENIED. Enable it in Settings › SideInstaller › Local Network, then retry.")
                 engine.pairingStatus = "Local Network denied"
                 running = false
+                resolve(.failure(PairingError.localNetworkDenied))
                 return
             }
             engine.log("RPPairing: Local Network granted. Starting keep-alive (silent audio).")
@@ -112,18 +161,26 @@ final class PairingController {
         stopAdvertising()
         keepAlive.stopAll()
         running = false
+        engine.pairingPIN = nil
 
         switch outcome {
         case let .success(name, model, udid, path):
             let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? 0
             engine.log("RPPairing: SUCCESS — \(name) (\(model)) UDID \(udid)")
             engine.log("RPPairing: pairing file written to \(path) (\(size) bytes)")
-            if size == 0 { engine.log("⚠️ pairing file is zero bytes — Connect will refuse to use it.") }
-            engine.pairingFilePath = path
-            engine.pairingStatus = "paired: \(name) (\(size)B)"
+            if size == 0 {
+                engine.log("⚠️ pairing file is zero bytes — Connect will refuse to use it.")
+                engine.pairingStatus = "failed: empty pairing file"
+                resolve(.failure(PairingError.zeroBytes))
+            } else {
+                engine.pairingFilePath = path
+                engine.pairingStatus = "paired: \(name) (\(size)B)"
+                resolve(.success(path))
+            }
         case let .failure(message):
             engine.log("RPPairing: FAILED — \(message)")
             engine.pairingStatus = "failed: \(message)"
+            resolve(.failure(PairingError.failed(message)))
         }
     }
 
@@ -146,6 +203,8 @@ final class PairingController {
     fileprivate func presentPin(_ pin: String) {
         engine.log("RPPairing: PIN = \(pin) — confirm it on this device (Settings → Developer Mode → Pair with SideInstaller).")
         engine.pairingStatus = "enter PIN \(pin) in Settings"
+        // Surfaced as a prominent card in the one-click UI.
+        engine.pairingPIN = pin
     }
 
     private func stopAdvertising() {

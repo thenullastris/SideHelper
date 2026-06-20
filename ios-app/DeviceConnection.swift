@@ -356,7 +356,11 @@ final class DeviceConnection {
     }
 }
 
-/// installation_proxy progress callback (C, no captures) — logs each update.
+/// installation_proxy progress callback (C, no captures) — drives the progress
+/// bar and logs each update.
 private let installProgressCb: @convention(c) (UInt64, UnsafeMutableRawPointer?) -> Void = { progress, _ in
-    DispatchQueue.main.async { Engine.shared.log("install progress: \(progress)%") }
+    DispatchQueue.main.async {
+        Engine.shared.installProgress = Double(progress) / 100.0
+        Engine.shared.log("install progress: \(progress)%")
+    }
 }
