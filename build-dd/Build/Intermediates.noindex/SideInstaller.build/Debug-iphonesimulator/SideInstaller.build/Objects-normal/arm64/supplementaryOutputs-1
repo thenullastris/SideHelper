@@ -1,0 +1,23 @@
+{
+  "/Users/tommasodaddio/Desktop/SideInstaller/ios-app/AnisetteServers.swift" : {
+    "const-values" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/AnisetteServers.swiftconstvalues",
+    "dependencies" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/AnisetteServers.d",
+    "diagnostics" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/AnisetteServers.dia",
+    "object" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/AnisetteServers.o",
+    "swift-dependencies" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/AnisetteServers.swiftdeps"
+  },
+  "/Users/tommasodaddio/Desktop/SideInstaller/ios-app/CertManager.swift" : {
+    "const-values" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/CertManager.swiftconstvalues",
+    "dependencies" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/CertManager.d",
+    "diagnostics" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/CertManager.dia",
+    "object" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/CertManager.o",
+    "swift-dependencies" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/CertManager.swiftdeps"
+  },
+  "/Users/tommasodaddio/Desktop/SideInstaller/ios-app/CertsView.swift" : {
+    "const-values" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/CertsView.swiftconstvalues",
+    "dependencies" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/CertsView.d",
+    "diagnostics" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/CertsView.dia",
+    "object" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/CertsView.o",
+    "swift-dependencies" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/CertsView.swiftdeps"
+  }
+}
