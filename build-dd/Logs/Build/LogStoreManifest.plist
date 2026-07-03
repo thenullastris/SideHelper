@@ -6,7 +6,7 @@
 	<integer>13</integer>
 	<key>logs</key>
 	<dict>
-		<key>030D4FBE-6F49-4099-B688-C8104F56A84A</key>
+		<key>1AD052FD-C652-4F2E-9020-7DA17A2E2B26</key>
 		<dict>
 			<key>className</key>
 			<string>IDECommandLineBuildLog</string>
@@ -15,7 +15,49 @@
 			<key>domainType</key>
 			<string>Xcode.IDEActivityLogDomainType.BuildLog</string>
 			<key>fileName</key>
-			<string>030D4FBE-6F49-4099-B688-C8104F56A84A.xcactivitylog</string>
+			<string>1AD052FD-C652-4F2E-9020-7DA17A2E2B26.xcactivitylog</string>
+			<key>hasPrimaryLog</key>
+			<true/>
+			<key>primaryObservable</key>
+			<dict>
+				<key>highLevelStatus</key>
+				<string>S</string>
+				<key>totalNumberOfAnalyzerIssues</key>
+				<integer>0</integer>
+				<key>totalNumberOfErrors</key>
+				<integer>0</integer>
+				<key>totalNumberOfTestFailures</key>
+				<integer>0</integer>
+				<key>totalNumberOfWarnings</key>
+				<integer>0</integer>
+			</dict>
+			<key>schemeIdentifier-containerName</key>
+			<string>SideInstaller project</string>
+			<key>schemeIdentifier-schemeName</key>
+			<string>SideInstaller</string>
+			<key>schemeIdentifier-sharedScheme</key>
+			<integer>1</integer>
+			<key>signature</key>
+			<string>Building project SideInstaller with scheme SideInstaller</string>
+			<key>timeStartedRecording</key>
+			<real>804787978.98979604</real>
+			<key>timeStoppedRecording</key>
+			<real>804787983.77601504</real>
+			<key>title</key>
+			<string>Building project SideInstaller with scheme SideInstaller</string>
+			<key>uniqueIdentifier</key>
+			<string>1AD052FD-C652-4F2E-9020-7DA17A2E2B26</string>
+		</dict>
+		<key>A7056404-F481-4A19-B566-4CE869AE84CA</key>
+		<dict>
+			<key>className</key>
+			<string>IDECommandLineBuildLog</string>
+			<key>documentTypeString</key>
+			<string>&lt;nil&gt;</string>
+			<key>domainType</key>
+			<string>Xcode.IDEActivityLogDomainType.BuildLog</string>
+			<key>fileName</key>
+			<string>A7056404-F481-4A19-B566-4CE869AE84CA.xcactivitylog</string>
 			<key>hasPrimaryLog</key>
 			<true/>
 			<key>primaryObservable</key>
@@ -40,13 +82,13 @@
 			<key>signature</key>
 			<string>Building project SideInstaller with scheme SideInstaller</string>
 			<key>timeStartedRecording</key>
-			<real>804597450.92481196</real>
+			<real>804787817.059044</real>
 			<key>timeStoppedRecording</key>
-			<real>804597466.10627997</real>
+			<real>804787821.02809095</real>
 			<key>title</key>
 			<string>Building project SideInstaller with scheme SideInstaller</string>
 			<key>uniqueIdentifier</key>
-			<string>030D4FBE-6F49-4099-B688-C8104F56A84A</string>
+			<string>A7056404-F481-4A19-B566-4CE869AE84CA</string>
 		</dict>
 	</dict>
 </dict>
