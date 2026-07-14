@@ -1,4 +1,12 @@
-# Install it [here](https://frizzlem.github.io/SideInstaller/)
+# SideInstaller (Khmer Localization Fork)
+
+> **🇰🇭 This fork is specifically maintained to add full Khmer (Cambodian) language support to SideInstaller.**  
+> The user interface, alerts, and onboarding text have been translated to make sideloading accessible for Khmer‑speaking iPhone and iPad users.  
+> *This fork does not change the core functionality – it only adds Khmer localization.*
+
+---
+
+## Install it [here](https://frizzlem.github.io/SideInstaller/)
 
 <img width="589" height="1209" alt="29EF8C23-3D7A-42CB-B95F-F1D11461442F_1_201_a" src="https://github.com/user-attachments/assets/600987fd-e294-4e6f-86ee-59a181bd2010" />
 
@@ -10,18 +18,35 @@ The whole thing is built to be simple. There's no complicated configuration, no 
 
 And because it's open source, you don't have to take my word for any of it. The full code is available for anyone to read, audit, or contribute to, so you can see exactly what's running on your device.
 
-# Requirements:
-- A Wi-Fi router or a hotspot connection
+---
+
+## Requirements
+
+- A Wi‑Fi router or a hotspot connection
 - An iPhone/iPad on iOS 27
 
-# How to use it
-1. Install LocalDevVPN and connect to the VPN
-2. Open [this page](https://frizzlem.github.io/SideInstaller/) and try installing it using any of the certificates
-3. Once you installed it, open it
-4. Log in with your Apple account credentials
-5. Click "Install Sidestore" or "Install Sidestore + Livecontainer"
-6. Sidestore or SS + Livecontainer will install, depending on which one you chose
-7. That's it, no pc or extra steps required.
+---
 
-# Is SideInstaller Safe?
-SideInstaller is built with safety and privacy in mind. The app is fully local and open source, which means anyone can inspect exactly what it does. Your Apple credentials also never leave your device, they're used locally, only to sign and install your apps, and are never transmitted, logged, or collected in any way. There's no server collecting your data, no analytics tracking what you do, and no account to sign up for. Everything happens on your iPhone and you can verify every line of it yourself in the source code.
+## How to use it
+
+1. Install LocalDevVPN and connect to the VPN.
+2. Open [this page](https://frizzlem.github.io/SideInstaller/) and try installing it using any of the certificates.
+3. Once you've installed it, open the app.
+4. Log in with your Apple account credentials.
+5. Click "Install Sidestore" or "Install Sidestore + Livecontainer".
+6. SideStore (or SS + LiveContainer) will install, depending on which one you chose.
+7. That's it – no PC or extra steps required.
+
+---
+
+## Is SideInstaller Safe?
+
+SideInstaller is built with safety and privacy in mind. The app is fully local and open source, which means anyone can inspect exactly what it does. Your Apple credentials also never leave your device – they're used locally, only to sign and install your apps, and are never transmitted, logged, or collected in any way. There's no server collecting your data, no analytics tracking what you do, and no account to sign up for. Everything happens on your iPhone, and you can verify every line of it yourself in the source code.
+
+---
+
+## About This Fork
+
+This repository is a fork of the original [SideInstaller by FrizzleM](https://github.com/FrizzleM/SideInstaller).  
+**The sole purpose of this fork is to add Khmer language support** – all core code, licensing, and credits remain with the original author.  
+If you speak Khmer and want to use SideInstaller in your native language, this is the version for you.
