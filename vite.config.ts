@@ -1,15 +1,13 @@
-import { defineConfig } from "vite";
-import { tanstackStartVite } from "@tanstack/start-vite";
-import tsconfigPaths from "vite-tsconfig-paths";
+import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
 export default defineConfig({
-  plugins: [
-    tanstackStartVite({
-      deployment: {
-        target: "static", // 👈 This overrides the default server configuration
-      },
-    }),
-    tsconfigPaths(),
-  ],
-  base: "/SideHelper/", // 👈 Maps assets safely for your subfolder path
+  tanstackStart: {
+    // ⚠️ Remove the server: { entry: "server" } block completely
+    deployment: {
+      target: "static", // 👈 FORCE LOVABLE TO EXPORT STATIC HTML
+    },
+  },
+  vite: {
+    base: "/SideHelper/", // Keeps your asset mapping intact
+  }
 });
