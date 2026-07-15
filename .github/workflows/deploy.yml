@@ -16,30 +16,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v1
+      - name: Install Node.js
+        uses: actions/setup-node@v4
         with:
-          bun-version: latest
+          node-version: 20
+          cache: 'npm'
 
-  # Bun handles caching internally and is much faster than npm
       - name: Install dependencies
-        run: bun install
+        run: npm install
 
       - name: Build Static Site
-        run: bun run build
+        run: npm run build
 
       - name: Upload Artifacts
         uses: actions/upload-pages-artifact@v3
         with:
-          path: '.output/public' # Double check if it creates .output/public or output/public
-
-  deploy:
-    needs: build_site
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+          path: './dist' # 👈 Changed from .output to standard Vite dist folder
