@@ -1,0 +1,1254 @@
+import Foundation
+import SideInstallerFFI
+
+/// One ordered step of the one-click install. The denominator for the progress
+/// bar and the rows of the step checklist.
+enum Step: Int, CaseIterable, Identifiable {
+    case network, pair, connect, signIn, download, sign, install, writePairing
+
+    var id: Int { rawValue }
+
+    /// The checklist label. The download/install rows name the chosen build so
+    /// the timeline matches what the user picked (e.g. "SS + LiveContainer")
+    /// rather than always saying "SideStore".
+    func title(for source: InstallSource) -> String {
+        switch self {
+        case .network:      return "ភ្ជាប់ VPN"
+        case .pair:         return "ភ្ជាប់ជាមួយ iPhone នេះ"
+        case .connect:      return "បើកតំណភ្ជាប់ឧបករណ៍"
+        case .signIn:       return "ចូល Apple ID"
+        case .download:     return "ទាញយក \(source.shortName)"
+        case .sign:         return "ចុះហត្ថលេខាលើកម្មវិធី"
+        case .install:      return "ដំឡើង \(source.shortName)"
+        case .writePairing: return "បញ្ចប់ការដំឡើង"
+        }
+    }
+}
+
+enum StepState {
+    case pending   // not started
+    case active    // running
+    case waiting   // running, but blocked on something the user must do
+    case done      // finished OK
+    case failed    // stopped here
+}
+
+/// A contextual instruction card shown to the user (open this app, go here,
+/// paste that). Kept data-only so the View can render it however it likes.
+struct Guide: Equatable {
+    var title: String
+    var systemImage: String
+    var steps: [String]
+    var actionLabel: String?
+    var actionURLString: String?
+
+    var actionURL: URL? { actionURLString.flatMap(URL.init(string:)) }
+}
+
+/// A small typed error so step failures carry a friendly, user-facing sentence
+/// (the raw FFI error is always also written to the log).
+enum EngineError: LocalizedError {
+    case message(String)
+    /// Apple's free-account cap of 3 signing certificates is already used up.
+    case certLimit
+    /// The connected device's UDID couldn't be registered with the developer
+    /// team, so the provisioning profile can't be issued (Apple error 8220).
+    /// Carries the UDID and the raw error so both the message and the guide can
+    /// show the UDID for manual entry.
+    case deviceRegistration(udid: String, raw: String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .message(m):
+            return m
+        case .certLimit:
+            return "Apple allows only 3 signing certificates per Apple ID and this one already has 3, so a new one can't be made. Open the Certificates tab, tap “Load certificates”, and revoke an old or expired one to free a slot — then tap Install again. See the steps above."
+        case let .deviceRegistration(udid, raw):
+            let tail = udid.isEmpty ? "" : " (UDID \(udid))"
+            return "Couldn't register this iPhone\(tail) with your Apple ID's developer team, so Apple won't issue a provisioning profile. \(raw) — see the steps above."
+        }
+    }
+}
+
+/// The single place all business logic lives. SwiftUI's views only read
+/// `@Published` state and call these methods — zero logic in the views.
+///
+/// A singleton because the C logging callback (a bare `@convention(c)` function
+/// pointer that can't capture context) routes lines to `Engine.shared`.
+final class Engine: ObservableObject {
+
+    static let shared = Engine()
+
+    // MARK: Log console
+
+    struct LogEntry: Identifiable {
+        let id = UUID()
+        let stamp: String
+        let text: String
+    }
+
+    @Published private(set) var lines: [LogEntry] = []
+
+    // MARK: Inputs
+
+    @Published var appleID: String = ""
+    @Published var applePassword: String = ""
+    @Published var anisetteURL: String = AnisetteServer.fallback.address
+    /// Servers the user can pick from. Seeded with a bundled snapshot so the
+    /// picker is populated instantly, then refreshed from the live list on
+    /// launch (see `loadAnisetteServers`).
+    @Published private(set) var anisetteServers: [AnisetteServer] = AnisetteServer.bundledDefaults
+    // LocalDevVPN's default device (target) IP; configurable in Advanced.
+    @Published var deviceIP: String = "10.7.0.1"
+    // Which build to install (plain SideStore vs LiveContainer + SideStore).
+    @Published var installSource: InstallSource = .sideStore
+
+    // MARK: Plain-text status readouts
+
+    /// Live LocalDevVPN loopback state, polled (see `startStatusMonitor`) so the
+    /// UI banner + the Install gate always reflect the current tunnel.
+    @Published var vpnConnected: Bool = false
+    /// Live Wi-Fi (`en0`) state, polled alongside `vpnConnected`. The tunnel runs
+    /// over Wi-Fi, so Wi-Fi is the first precondition the Install gate checks —
+    /// without it, LocalDevVPN can't come up in the first place.
+    @Published var wifiConnected: Bool = false
+    @Published var vpnStatus: String = "unknown"
+    @Published var wifiStatus: String = "unknown"
+    @Published var pairingStatus: String = "not paired"
+    @Published var signInStatus: String = "signed out"
+
+    // Path to the pairing file produced by RPPairing (STEP 2).
+    @Published var pairingFilePath: String?
+
+    // MARK: One-click orchestration state
+
+    /// Per-step status, the backbone of the checklist + progress bar.
+    @Published var stepStates: [Step: StepState] = Dictionary(
+        uniqueKeysWithValues: Step.allCases.map { ($0, .pending) })
+
+    /// Install percentage (0…1) streamed from installation_proxy; also feeds the
+    /// fractional part of the overall progress bar while installing.
+    @Published var installProgress: Double = 0
+
+    /// The pairing PIN to display prominently, when one has been issued.
+    @Published var pairingPIN: String?
+
+    /// Short human summary of the connected device, e.g. "iPhone · iOS 17.5".
+    @Published var deviceSummary: String?
+
+    /// The connected iPhone's UDID + name, captured from the lockdown handshake
+    /// during `connect`. The UDID is registered with the developer team before
+    /// signing (Apple rejects the provisioning profile with error 8220 if the
+    /// team has no devices), and is shown to the user if registration fails.
+    private(set) var deviceUDID: String?
+    private(set) var deviceName: String?
+
+    /// The current contextual instruction card (nil = none).
+    @Published var guide: Guide?
+
+    /// True while the one-click pipeline is running.
+    @Published var isRunning: Bool = false
+
+    /// Set when the pipeline stops on an error; cleared on a new run.
+    @Published var lastError: String?
+
+    /// Set once the whole pipeline has completed successfully.
+    @Published var finished: Bool = false
+
+    private var pipelineTask: Task<Void, Never>?
+    /// Repeating poll that keeps `vpnConnected` live for the UI banner. A timer
+    /// (not NWPathMonitor) because LocalDevVPN is a local-only tunnel with no
+    /// default route, so a path monitor never fires when it comes up or down.
+    private var statusTimer: Timer?
+
+    /// True when the build that was actually installed is the LiveContainer +
+    /// SideStore bundle (falls back to the current selection before any
+    /// download). Drives the post-install "import the certificate into
+    /// LiveContainer" card, which only applies to that build.
+    var installedIsLiveContainer: Bool {
+        (downloadedSource ?? installSource) == .liveContainer
+    }
+
+    /// Name of the build that was installed (or is selected, before any
+    /// download) — used so post-install copy names the right app.
+    var installedSourceName: String {
+        (downloadedSource ?? installSource).displayName
+    }
+
+    /// Home-screen app name of what actually landed on the device — the app the
+    /// user taps to open (LiveContainer, not "LiveContainer + SideStore"). Used
+    /// for the trust card so it names the right icon to open.
+    var installedAppName: String {
+        (downloadedSource ?? installSource).pairingAppDisplayName
+    }
+
+    /// Overall fraction across all steps (0…1). Computed from the published
+    /// step states + install sub-progress, so the bar updates automatically.
+    var overallProgress: Double {
+        let total = Double(Step.allCases.count)
+        let done = Double(Step.allCases.filter { stepStates[$0] == .done }.count)
+        let frac = (stepStates[.install] == .active || stepStates[.install] == .waiting)
+            ? installProgress : 0
+        return min(1, (done + frac) / total)
+    }
+
+    // Loopback connection over LocalDevVPN (idevice FFI). Long-lived; reused
+    // across device-info / list-apps / install. Serialized on deviceQueue.
+    let connection = DeviceConnection()
+    private let deviceQueue = DispatchQueue(label: "sideinstaller.device")
+
+    // Apple ID sign-in / signing (isideload via FFI). Serialized on signQueue.
+    private let signQueue = DispatchQueue(label: "sideinstaller.sign")
+    private var signSession: OpaquePointer?          // SignSession*
+    @Published var downloadedIPAPath: String?
+    // Which source the current download corresponds to (so switching the
+    // selection forces a re-download rather than reusing the other build).
+    private var downloadedSource: InstallSource?
+    @Published var signedAppPath: String?
+
+    // 2FA bridge: the FFI 2FA callback (on a Rust worker thread) blocks on this
+    // semaphore until the UI submits/cancels a code.
+    @Published var pendingTwoFactor = false
+    private let twoFactorSem = DispatchSemaphore(value: 0)
+    private var twoFactorResult: String?
+    /// Set when the user taps Cancel on the 2FA prompt. Lets the sign-in loop
+    /// stop instead of re-prompting for every remaining anisette server. Shared
+    /// with `CertManager`, which drives the same 2FA prompt.
+    var twoFactorWasCancelled = false
+
+    private let dateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f
+    }()
+
+    private init() {
+        installLogging()
+        log("SideInstaller ready.")
+        // Launch self-test: exercises si_ping (which logs via tracing::info!),
+        // proving the full Rust-tracing -> FFI callback -> console path at start.
+        ping()
+        // Show the loopback/Wi-Fi status on launch so the user knows whether to
+        // start LocalDevVPN before running, then keep it live for the banner.
+        checkVPNAndWifi()
+        startStatusMonitor()
+        // Refresh the anisette server picker from the live community list.
+        loadAnisetteServers()
+    }
+
+    // MARK: - Anisette servers
+
+    /// Pull the live anisette server list (the one SideStore/iLoader share) and
+    /// swap it in for the bundled snapshot. Silently keeps the snapshot on any
+    /// failure — the picker stays usable offline.
+    func loadAnisetteServers() {
+        Task { @MainActor in
+            do {
+                let servers = try await AnisetteServer.fetchList()
+                guard !servers.isEmpty else { return }
+                self.anisetteServers = servers
+                log("Loaded \(servers.count) anisette servers.")
+            } catch {
+                log("Couldn't refresh anisette servers (\(short(error))); using \(self.anisetteServers.count) bundled.")
+            }
+        }
+    }
+
+    // MARK: - Logging
+
+    private func installLogging() {
+        let rc = si_log_init(siLogCallback, nil)
+        if rc == 0 {
+            log("si_log_init: OK — idevice tracing is now piped into this console.")
+        } else {
+            log("si_log_init: already initialised (rc=\(rc)).")
+        }
+    }
+
+    /// Append a line from Swift. Safe to call from any thread.
+    func log(_ message: String) {
+        appendLine(message)
+    }
+
+    /// Append a line that originated in the Rust core's tracing output.
+    func appendRustLine(_ message: String) {
+        appendLine("[rust] " + message)
+    }
+
+    private func appendLine(_ message: String) {
+        let stamp = dateFormatter.string(from: Date())
+        let entry = LogEntry(stamp: stamp, text: message)
+        if Thread.isMainThread {
+            lines.append(entry)
+        } else {
+            DispatchQueue.main.async { [weak self] in self?.lines.append(entry) }
+        }
+    }
+
+    func clearLog() {
+        lines.removeAll()
+    }
+
+    /// One big string for the “Copy logs” button.
+    func logText() -> String {
+        lines.map { "\($0.stamp)  \($0.text)" }.joined(separator: "\n")
+    }
+
+    // MARK: - Step / guide helpers
+
+    private func setStep(_ step: Step, _ state: StepState) {
+        setMain { self.stepStates[step] = state }
+    }
+
+    private func setGuide(_ guide: Guide?) {
+        setMain { self.guide = guide }
+    }
+
+    private func resetRun() {
+        setMain {
+            for s in Step.allCases { self.stepStates[s] = .pending }
+            self.installProgress = 0
+            self.pairingPIN = nil
+            self.guide = nil
+            self.deviceSummary = nil
+            self.deviceUDID = nil
+            self.deviceName = nil
+            self.lastError = nil
+            self.finished = false
+        }
+    }
+
+    /// Move whichever step is currently active/waiting into a terminal state
+    /// (used when the pipeline stops or is cancelled).
+    private func failActiveStep(to state: StepState) {
+        setMain {
+            for s in Step.allCases where self.stepStates[s] == .active || self.stepStates[s] == .waiting {
+                self.stepStates[s] = state
+            }
+        }
+    }
+
+    // MARK: - One-click pipeline (the default flow)
+
+    /// Run every step needed to install SideStore, in order, stopping at the
+    /// first failure with a clear message. This is the app's primary action.
+    @MainActor
+    func runOneClick() {
+        guard !isRunning else { return }
+        guard !appleID.isEmpty, !applePassword.isEmpty else {
+            log("Enter your Apple ID email + password first.")
+            return
+        }
+        // Pre-flight gate: the entire install runs over LocalDevVPN's loopback
+        // tunnel, which itself rides on Wi-Fi — so require Wi-Fi first, then the
+        // tunnel, showing how instead of just failing. (ensureNetwork() below
+        // still waits too, as a mid-run safety net in case either drops after
+        // this check passes.)
+        refreshNetworkStatus()
+        guard wifiConnected else {
+            setGuide(Guides.wifi)
+            log("⛔️ Wi-Fi is off. Connect to a Wi-Fi network, then tap Install again.")
+            return
+        }
+        guard vpnConnected else {
+            setGuide(Guides.vpn)
+            log("⛔️ LocalDevVPN isn't connected. Turn it on, then tap Install again.")
+            return
+        }
+        resetRun()
+        isRunning = true
+        log("=== Starting one-click install ===")
+
+        pipelineTask = Task { @MainActor in
+            do {
+                try await ensureNetwork()
+                try await pairAndConnect()
+                try await signIn()
+                try await download()
+                try await signApp()
+                try await install()
+                try await writePairing()
+                finishSuccess()
+            } catch is CancellationError {
+                log("Install cancelled.")
+                failActiveStep(to: .pending)
+                setGuide(nil)
+            } catch {
+                let msg = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+                lastError = msg
+                log("⛔️ Stopped: \(msg)")
+                failActiveStep(to: .failed)
+            }
+            isRunning = false
+            pairingPIN = nil
+        }
+    }
+
+    /// Stop the pipeline at the next safe point.
+    @MainActor
+    func cancelOneClick() {
+        pipelineTask?.cancel()
+        PairingController.shared.softCancel()   // unblock a pending pairing wait
+    }
+
+    // MARK: Step 1 — network (waits for LocalDevVPN)
+
+    @MainActor
+    private func ensureNetwork() async throws {
+        setStep(.network, .active)
+        // Track which blocker we last logged so we announce each stage once, yet
+        // still re-announce when the user clears one (Wi-Fi → tunnel) and the
+        // next comes into view.
+        var announced: String?
+        while true {
+            try Task.checkCancellation()
+            let (vpn, wifi, detail) = NetworkStatus.summarize(deviceIP: deviceIP)
+            vpnConnected = vpn
+            wifiConnected = wifi
+            vpnStatus = vpn ? "tunnel up" : "no tunnel"
+            wifiStatus = wifi ? "on" : "off"
+            if wifi && vpn {
+                log("Network OK: \(detail)")
+                setStep(.network, .done)
+                setGuide(nil)
+                return
+            }
+            setStep(.network, .waiting)
+            if !wifi {
+                // Wi-Fi is the prerequisite for the tunnel, so surface it first —
+                // even if a stale tunnel interface still reads as up.
+                if announced != "wifi" {
+                    log("Waiting for Wi-Fi… connect to a Wi-Fi network.")
+                    announced = "wifi"
+                }
+                setGuide(Guides.wifi)
+            } else {
+                if announced != "vpn" {
+                    log("Waiting for LocalDevVPN tunnel… open LocalDevVPN and tap Connect.")
+                    announced = "vpn"
+                }
+                setGuide(Guides.vpn)
+            }
+            try await Task.sleep(nanoseconds: 1_500_000_000)
+        }
+    }
+
+    // MARK: Step 2+3 — pair, then connect (with a one-shot re-pair fallback)
+
+    @MainActor
+    private func pairAndConnect() async throws {
+        let path = PairingController.pairingFilePath()
+        let reused = fileExistsNonEmpty(path)
+        if reused {
+            log("Found an existing pairing file — trying it first.")
+            pairingFilePath = path
+            setStep(.pair, .done)
+        } else {
+            try await pair()
+        }
+
+        do {
+            try await connect()
+        } catch {
+            // A reused pairing file can be stale (re-paired device, old file).
+            // Pair fresh once, then retry the connection.
+            guard reused else { throw error }
+            log("Saved pairing didn't work (\(short(error))). Pairing fresh…")
+            try await pair()
+            try await connect()
+        }
+    }
+
+    @MainActor
+    private func pair() async throws {
+        setStep(.pair, .waiting)
+        setGuide(Guides.pairing)
+        log("Pairing: starting on-device pairing service…")
+        let path = try await PairingController.shared.startAndWait()
+        pairingFilePath = path
+        pairingPIN = nil
+        setStep(.pair, .done)
+        setGuide(nil)
+    }
+
+    @MainActor
+    private func connect() async throws {
+        setStep(.connect, .active)
+        setGuide(nil)
+        let ip = deviceIP
+        let path = pairingFilePath ?? PairingController.pairingFilePath()
+        let device = try await onDeviceQueue { try self.performConnect(ip: ip, pairingPath: path) }
+        deviceSummary = device.summary
+        deviceUDID = device.udid
+        deviceName = device.name
+        pairingStatus = "connected"
+        setStep(.connect, .done)
+    }
+
+    /// The connected device's summary line plus the identifiers needed to
+    /// register it with the developer team before signing.
+    private struct ConnectedDevice {
+        let summary: String
+        let udid: String?
+        let name: String?
+    }
+
+    private func performConnect(ip: String, pairingPath path: String) throws -> ConnectedDevice {
+        // Gate: never attempt a connect with a missing/zero-byte pairing file —
+        // idevice maps the file-read error to a confusing Socket(ENOENT).
+        let size = fileSize(path)
+        guard FileManager.default.fileExists(atPath: path), size > 0 else {
+            throw EngineError.message("Pairing didn't finish — no pairing file yet.")
+        }
+        log("Pairing file OK (\(size) bytes). Connecting over TCP/RSD \(ip):\(DeviceConnection.rsdPort) …")
+        try connection.connect(deviceIP: ip, pairingFilePath: path)
+        log("Tunnel + RSD handshake established.")
+        log(try connection.rsdSummary())
+        let info = try connection.deviceInfo()
+        var dict: [String: String] = [:]
+        if info.isEmpty {
+            log("Device info: (lockdownd returned no values)")
+        } else {
+            log("Device info:")
+            for (k, v) in info { dict[k] = v; log("  \(k) = \(v)") }
+        }
+        let name = dict["DeviceName"] ?? "device"
+        let summary: String
+        if let version = dict["ProductVersion"] {
+            summary = "\(name) · iOS \(version)"
+        } else {
+            summary = name
+        }
+        return ConnectedDevice(summary: summary,
+                               udid: dict["UniqueDeviceID"],
+                               name: dict["DeviceName"])
+    }
+
+    // MARK: Step 4 — Apple ID sign-in
+
+    @MainActor
+    private func signIn() async throws {
+        if signSession != nil {
+            log("Already signed in this session — skipping.")
+            setStep(.signIn, .done)
+            return
+        }
+        guard !appleID.isEmpty, !applePassword.isEmpty else {
+            throw EngineError.message("Enter your Apple ID email + password.")
+        }
+        setStep(.signIn, .active)
+
+        // Anisette servers are flaky and go down often, so don't fail on the
+        // first one — try the user's pick, then every other known server, and
+        // only give up once they've all failed. (Apple ID errors that no server
+        // could fix, like a wrong password or a cancelled 2FA prompt, stop the
+        // loop early — see below.)
+        let servers = anisetteCandidates()
+        let id = appleID, pw = applePassword, dir = storageDir
+        twoFactorWasCancelled = false
+        var lastError = "no anisette servers configured"
+
+        for (idx, ani) in servers.enumerated() {
+            try Task.checkCancellation()
+            let name = anisetteName(for: ani)
+            signInStatus = servers.count > 1
+                ? "signing in via \(name) (\(idx + 1)/\(servers.count))…"
+                : "signing in…"
+            if servers.count > 1 {
+                log("Sign-in attempt \(idx + 1)/\(servers.count) — anisette \(name).")
+            }
+            do {
+                let summary = try await onSignQueue {
+                    try self.performSignIn(id: id, pw: pw, ani: ani, dir: dir)
+                }
+                // Worked — remember the server that succeeded so the rest of the
+                // app (and any re-run) sticks with it.
+                anisetteURL = ani
+                signInStatus = "signed in (\(summary))"
+                setStep(.signIn, .done)
+                return
+            } catch let error as EngineError {
+                lastError = error.errorDescription ?? "sign-in failed"
+
+                // A cancelled 2FA prompt isn't the server's fault — bail now
+                // rather than re-prompting for every remaining server.
+                if twoFactorWasCancelled {
+                    log("Two-factor verification cancelled — stopping.")
+                    signInStatus = "signed out"
+                    throw EngineError.message("Two-factor verification was cancelled.")
+                }
+                // A bad Apple ID / password fails the same way on every server,
+                // and hammering Apple with repeated bad logins risks locking the
+                // account — so stop instead of cycling through the whole list.
+                if Self.isCredentialError(lastError) {
+                    signInStatus = "sign-in failed"
+                    throw EngineError.message("Apple ID sign-in failed: \(lastError)")
+                }
+                log("Anisette \(name) failed: \(lastError)")
+                if idx < servers.count - 1 { log("Trying the next anisette server…") }
+            }
+        }
+
+        signInStatus = "sign-in failed"
+        let tried = servers.count == 1 ? "the anisette server" : "all \(servers.count) anisette servers"
+        throw EngineError.message("Apple ID sign-in failed on \(tried). Last error: \(lastError)")
+    }
+
+    /// One sign-in attempt against a specific anisette server. Returns the
+    /// account summary on success; throws `EngineError.message` with the raw
+    /// failure text (so the caller can classify it) otherwise.
+    private func performSignIn(id: String, pw: String, ani: String, dir: String) throws -> String {
+        log("Apple ID sign-in for \(id) via anisette \(ani) …")
+        var session: OpaquePointer?
+        var summary: UnsafeMutablePointer<CChar>?
+        var error: UnsafeMutablePointer<CChar>?
+        let rc = si_apple_signin(id, pw, ani, "SideInstaller", dir,
+                                 twoFactorCallback, nil,
+                                 &session, &summary, &error)
+        if rc == 0 {
+            if let old = self.signSession { si_sign_session_free(old) }
+            self.signSession = session
+            let s = summary.map { String(cString: $0) } ?? ""
+            summary.map { si_string_free($0) }
+            log("Sign-in OK. \(s)")
+            return s
+        } else {
+            let msg = error.map { String(cString: $0) } ?? "rc=\(rc)"
+            error.map { si_string_free($0) }
+            throw EngineError.message(msg)
+        }
+    }
+
+    /// Anisette servers to try, in order: the user's current pick first, then
+    /// every other known server. De-duplicated; addresses only.
+    private func anisetteCandidates() -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for addr in [anisetteURL] + anisetteServers.map(\.address) {
+            let a = addr.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !a.isEmpty, seen.insert(a).inserted { out.append(a) }
+        }
+        return out
+    }
+
+    /// Friendly name for an anisette address (falls back to the address itself).
+    private func anisetteName(for address: String) -> String {
+        anisetteServers.first { $0.address == address }?.name ?? address
+    }
+
+    /// Detect a definitive Apple ID credential failure (vs. a flaky anisette
+    /// server). Switching anisette servers can't fix these, so the sign-in loop
+    /// stops on them instead of trying every server.
+    static func isCredentialError(_ raw: String) -> Bool {
+        let m = raw.lowercased()
+        return m.contains("apple id or password")
+            || m.contains("password was incorrect")
+            || m.contains("incorrect apple id")
+            || m.contains("-20101")          // GSA: invalid username/password
+            || (m.contains("password") && m.contains("incorrect"))
+    }
+
+    // MARK: Step 5 — download SideStore
+
+    @MainActor
+    private func download() async throws {
+        let src = installSource
+        if let p = downloadedIPAPath, downloadedSource == src, FileManager.default.fileExists(atPath: p) {
+            log("\(src.displayName) IPA already downloaded — skipping.")
+            setStep(.download, .done)
+            return
+        }
+        setStep(.download, .active)
+        log("Fetching latest \(src.displayName) release…")
+        let path = try await SideStoreDownloader.downloadLatest(source: src) { line in self.log(line) }
+        downloadedIPAPath = path
+        downloadedSource = src
+        log("\(src.displayName) IPA ready at \(path)")
+        setStep(.download, .done)
+    }
+
+    // MARK: Step 6 — sign the IPA
+
+    @MainActor
+    private func signApp() async throws {
+        guard let session = signSession else { throw EngineError.message("Not signed in.") }
+        guard let ipa = downloadedIPAPath else { throw EngineError.message("No SideStore IPA downloaded.") }
+        // The signer registers this UDID with the developer team before asking
+        // Apple for a provisioning profile — a fresh/free team has no devices, so
+        // the profile download fails with error 8220 unless the device is added
+        // first (the step Sideloadly/AltStore do transparently).
+        let udid = deviceUDID ?? ""
+        let name = deviceName ?? ""
+        if udid.isEmpty {
+            log("⚠️ No device UDID captured — run the Connect step first, or signing may fail with error 8220.")
+        }
+        setStep(.sign, .active)
+        do {
+            let path = try await onSignQueue {
+                try self.performSign(session: session, ipa: ipa, udid: udid, deviceName: name)
+            }
+            signedAppPath = path
+            setStep(.sign, .done)
+        } catch {
+            // Failures with a concrete, user-fixable cause get an explanatory
+            // card alongside the stopped step.
+            if case EngineError.certLimit = error { setGuide(Guides.certLimit) }
+            if case let EngineError.deviceRegistration(udid, raw) = error {
+                setGuide(Guides.deviceRegistration(udid: udid, raw: raw))
+            }
+            throw error
+        }
+    }
+
+    private func performSign(session: OpaquePointer, ipa: String, udid: String, deviceName: String) throws -> String {
+        log("Signing \(ipa) …")
+        var signed: UnsafeMutablePointer<CChar>?
+        var error: UnsafeMutablePointer<CChar>?
+        let rc = si_sign_ipa(session, ipa, udid, deviceName, &signed, &error)
+        if rc == 0 {
+            let path = signed.map { String(cString: $0) } ?? ""
+            signed.map { si_string_free($0) }
+            log("Signed bundle at \(path)")
+            return path
+        } else {
+            let msg = error.map { String(cString: $0) } ?? "rc=\(rc)"
+            error.map { si_string_free($0) }
+            log("Sign FAILED: \(msg)")
+            if Self.isCertLimitError(msg) { throw EngineError.certLimit }
+            // Device-registration / "team has no devices" (8220) failures: carry
+            // the UDID so the error and its guide can show it for manual entry.
+            if Self.isDeviceRegistrationError(msg) {
+                throw EngineError.deviceRegistration(udid: udid, raw: msg)
+            }
+            throw EngineError.message("Signing failed: \(msg)")
+        }
+    }
+
+    /// Detect Apple's "max certificates" rejection in a raw signing error.
+    /// Apple returns e.g. "Developer error 7460: Maximum number of certificates
+    /// reached" (surfaced by isideload as "sign_app failed: …").
+    static func isCertLimitError(_ raw: String) -> Bool {
+        let m = raw.lowercased()
+        return m.contains("7460")
+            || m.contains("maximum number of certificates")
+            || (m.contains("certificate") && (m.contains("maximum") || m.contains("limit")))
+    }
+
+    /// Detect a device-registration failure: either our pre-sign registration
+    /// step failed (Rust prefixes "device registration failed for UDID …"), or
+    /// the profile download itself hit Apple error 8220 ("Your team has no
+    /// devices …") because no device was registered.
+    static func isDeviceRegistrationError(_ raw: String) -> Bool {
+        let m = raw.lowercased()
+        return m.contains("device registration failed")
+            || m.contains("8220")
+            || m.contains("no devices")
+            || m.contains("has no devices")
+    }
+
+    /// Distinguish a device *limit* rejection (free accounts can only register a
+    /// limited number of devices per year, and can't remove old ones) from other
+    /// registration failures — so the guide can give the right advice.
+    static func isDeviceLimitError(_ raw: String) -> Bool {
+        let m = raw.lowercased()
+        return m.contains("maximum number of devices")
+            || (m.contains("device") && (m.contains("maximum") || m.contains("too many")
+                || (m.contains("limit") && !m.contains("no devices"))))
+    }
+
+    // MARK: Step 7 — install over AFC + installation_proxy
+
+    @MainActor
+    private func install() async throws {
+        guard let bundle = signedAppPath else { throw EngineError.message("No signed bundle to install.") }
+        setStep(.install, .active)
+        installProgress = 0
+        try await onDeviceQueue {
+            guard self.connection.isConnected else { throw EngineError.message("Device link dropped — reconnect.") }
+            self.log("Installing signed bundle via AFC + installation_proxy …")
+            try self.connection.installSignedApp(bundlePath: bundle)
+            self.log("Install request completed.")
+        }
+        installProgress = 1
+        setStep(.install, .done)
+    }
+
+    // MARK: Step 8 — write the pairing file into SideStore
+
+    @MainActor
+    private func writePairing() async throws {
+        setStep(.writePairing, .active)
+        let path = pairingFilePath ?? PairingController.pairingFilePath()
+        // Use the build that was actually installed (falls back to the current
+        // selection) — it decides the host app and the path the file lands at.
+        let source = downloadedSource ?? installSource
+        try await onDeviceQueue { try self.performWritePairing(path: path, source: source) }
+        setStep(.writePairing, .done)
+    }
+
+    private func performWritePairing(path: String, source: InstallSource) throws {
+        guard connection.isConnected else { throw EngineError.message("Device link dropped — reconnect.") }
+        let size = fileSize(path)
+        guard FileManager.default.fileExists(atPath: path), size > 0 else {
+            throw EngineError.message("Pairing file missing — pairing must run first.")
+        }
+
+        // StikDebug: resolve and write exactly the way the Pairing tab does — that
+        // path is known to work. Unlike SideStore/LiveContainer (matched by display
+        // name), StikDebug ships an App Store build and a sideloaded build that share
+        // the display name "StikDebug" but read the pairing file from different paths.
+        // `PairingTargets.match` distinguishes them by bundle id (the sideloaded build,
+        // `com.stik.stikdebug.<teamID>`, reads `rp_pairing_file.plist`), so we pick the
+        // sideloaded target we just installed and hand it to the shared write helper.
+        if source == .stikDebug {
+            let stikTargets = try PairingTargets.match(installed: connection.installedApps())
+                .filter { $0.bundleID.contains(source.pairingBundleIDBase) }
+            guard let target = stikTargets.first(where: { $0.app.bundleIDContains != nil })
+                ?? stikTargets.first else {
+                throw EngineError.message("\(source.displayName) isn't installed yet — install must run first.")
+            }
+            log("Resolved \(target.name) bundle id: \(target.bundleID)")
+            try performInstallPairing(bundleID: target.bundleID,
+                                      remoteRelativePath: target.remoteRelativePath,
+                                      path: path)
+            return
+        }
+
+        // Resolve the *installed* host app's bundle id. installation_proxy is the
+        // source of truth — match by display name (survives the bundle id rewrite
+        // isideload performs), then by base bundle id; fall back to the signed
+        // bundle's id only if the lookup is empty. For LiveContainer the host app
+        // is LiveContainer (com.kdt.livecontainer.<teamID>), not SideStore.
+        let appName = source.pairingAppDisplayName
+        let bundleID: String
+        if let found = try connection.resolveInstalledBundleID(
+            displayName: appName, bundleIDBase: source.pairingBundleIDBase) {
+            bundleID = found
+        } else if let signed = signedAppBundleID() {
+            bundleID = signed
+            log("\(appName) not found via installation_proxy; using signed bundle id \(signed).")
+        } else {
+            throw EngineError.message("\(source.displayName) isn't installed yet — install must run first.")
+        }
+        // Plain SideStore reads the file at its Documents root; the LiveContainer
+        // guest reads it from a nested folder. The source picks the right path.
+        let remoteRel = source.pairingRemoteRelativePath
+        log("Resolved \(appName) bundle id: \(bundleID)")
+        log("Writing pairing file into \(bundleID) /Documents/\(remoteRel) …")
+        let written = try connection.writePairingFile(intoBundleID: bundleID,
+                                                       remoteRelativePath: remoteRel,
+                                                       pairingFilePath: path)
+        log("Pairing file written into \(appName) and read-back VERIFIED (\(written) bytes).")
+    }
+
+    // MARK: Success
+
+    @MainActor
+    private func finishSuccess() {
+        finished = true
+        setGuide(Guides.trust(appName: installedAppName))
+        log("✅ Done — \(installedSourceName) is installed. One trust step left (see the card).")
+    }
+
+    // MARK: - STEP 1: liveness
+
+    func ping() {
+        runInBackground("ping") {
+            guard let raw = si_ping() else {
+                self.log("si_ping returned null")
+                return
+            }
+            let msg = String(cString: raw)
+            si_string_free(raw)
+            self.log("si_ping -> \(msg)")
+        }
+    }
+
+    // MARK: - Advanced section: individual steps
+    //
+    // Each thin wrapper runs the same async core as the one-click flow, so the
+    // two paths can never drift. They log their own failures (the one-click
+    // orchestrator instead surfaces failures as a stopped step + guide).
+
+    func checkVPNAndWifi() {
+        let (vpn, wifi, detail) = NetworkStatus.summarize(deviceIP: deviceIP)
+        vpnConnected = vpn
+        wifiConnected = wifi
+        vpnStatus = vpn ? "tunnel up" : "no tunnel (start LocalDevVPN)"
+        wifiStatus = wifi ? "on" : "off"
+        log("Network: \(detail)")
+        log("VPN(loopback)=\(vpnStatus), Wi-Fi=\(wifiStatus). RSD target \(deviceIP):\(DeviceConnection.rsdPort).")
+        if !vpn { log("⚠️ No LocalDevVPN tunnel on \(deviceIP)'s subnet — open LocalDevVPN and tap Connect.") }
+    }
+
+    /// Poll the interface list so `vpnConnected` (and the plain-text readouts)
+    /// track LocalDevVPN coming up / dropping while the app is open. Added to the
+    /// run loop in `.common` mode so it keeps firing during scrolling.
+    private func startStatusMonitor() {
+        statusTimer?.invalidate()
+        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.refreshNetworkStatus()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        statusTimer = timer
+    }
+
+    /// One quiet (non-logging) re-scan of the LocalDevVPN/Wi-Fi state. Used by the
+    /// poll above and as the authoritative check inside the Install gate.
+    func refreshNetworkStatus() {
+        let (vpn, wifi, _) = NetworkStatus.summarize(deviceIP: deviceIP)
+        vpnConnected = vpn
+        wifiConnected = wifi
+        vpnStatus = vpn ? "tunnel up" : "no tunnel (start LocalDevVPN)"
+        wifiStatus = wifi ? "on" : "off"
+    }
+
+    /// RPPairing host (fire-and-forget; reports back through the shared engine).
+    func generatePairingFile() {
+        Task { @MainActor in PairingController.shared.start() }
+    }
+
+    func connectAndReadDeviceInfo() {
+        Task { @MainActor in
+            do { try await connect() } catch { log("Connect FAILED: \(short(error))") }
+        }
+    }
+
+    func listInstalledApps() {
+        deviceQueue.async { [weak self] in
+            guard let self else { return }
+            guard self.connection.isConnected else {
+                self.log("Not connected — run “Connect + read device info” first.")
+                return
+            }
+            do {
+                let apps = try self.connection.listApps()
+                self.log("installation_proxy reachable — \(apps.count) apps:")
+                for a in apps.prefix(200) { self.log("  \(a)") }
+            } catch {
+                self.log("List apps FAILED: \(error)")
+            }
+        }
+    }
+
+    func appleSignIn() {
+        Task { @MainActor in
+            do { try await signIn() } catch { log("Sign-in FAILED: \(short(error))") }
+        }
+    }
+
+    func fetchCertAndProfile() {
+        log("Cert + App ID + provisioning profile are fetched/registered automatically during “Sign IPA” (isideload's sign_app handles them).")
+    }
+
+    func downloadLatestSideStore() {
+        Task { @MainActor in
+            do { try await download() } catch { log("Download FAILED: \(short(error))") }
+        }
+    }
+
+    func signIPA() {
+        Task { @MainActor in
+            do { try await signApp() } catch { log("Sign FAILED: \(short(error))") }
+        }
+    }
+
+    func installSideStore() {
+        Task { @MainActor in
+            do { try await install() } catch { log("Install FAILED: \(short(error))") }
+        }
+    }
+
+    func writePairingIntoSideStore() {
+        Task { @MainActor in
+            do { try await writePairing() } catch { log("Write pairing FAILED: \(short(error))") }
+        }
+    }
+
+    /// Read CFBundleIdentifier from the signed .app's Info.plist.
+    private func signedAppBundleID() -> String? {
+        guard let app = signedAppPath else { return nil }
+        let plistPath = (app as NSString).appendingPathComponent("Info.plist")
+        guard let data = FileManager.default.contents(atPath: plistPath),
+              let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any]
+        else { return nil }
+        return plist["CFBundleIdentifier"] as? String
+    }
+
+    // MARK: - Pairing tab
+    //
+    // Standalone pairing-file management (the "Pairing" tab), independent of the
+    // one-click install. Mirrors iLoader's "Manage Pairing files": the file is
+    // produced by the same RPPairing host the install uses (PairingController),
+    // then written into a chosen installed app the same way SideStore receives
+    // it — over LocalDevVPN via house_arrest/AFC.
+
+    /// List the supported pairing-target apps actually installed on the device.
+    /// Brings the device link up first (using the saved pairing file) if needed.
+    @MainActor
+    func installedPairingTargets() async throws -> [InstalledPairingTarget] {
+        try await ensurePairingConnection()
+        let apps = try await onDeviceQueue { try self.connection.installedApps() }
+        let targets = PairingTargets.match(installed: apps)
+        log("Pairing: \(targets.count) supported app(s) installed\(targets.isEmpty ? "." : ": \(targets.map(\.name).joined(separator: ", "))")")
+        return targets
+    }
+
+    /// Write the current pairing file into one installed target app's container.
+    @MainActor
+    func installPairing(into target: InstalledPairingTarget) async throws {
+        try await ensurePairingConnection()
+        let path = pairingFilePath ?? PairingController.pairingFilePath()
+        let bundleID = target.bundleID
+        let rel = target.remoteRelativePath
+        try await onDeviceQueue {
+            try self.performInstallPairing(bundleID: bundleID, remoteRelativePath: rel, path: path)
+        }
+    }
+
+    /// Bring up the device link for a standalone pairing operation: reuse an
+    /// existing connection, else connect with the saved pairing file. Unlike the
+    /// install pipeline's `connect()`, this touches no step states.
+    @MainActor
+    private func ensurePairingConnection() async throws {
+        if connection.isConnected { return }
+        refreshNetworkStatus()
+        guard wifiConnected else {
+            throw EngineError.message("Wi-Fi is off. Connect to a Wi-Fi network, then try again.")
+        }
+        guard vpnConnected else {
+            throw EngineError.message("LocalDevVPN isn't connected. Turn it on, then try again.")
+        }
+        let path = pairingFilePath ?? PairingController.pairingFilePath()
+        guard fileExistsNonEmpty(path) else {
+            throw EngineError.message("No pairing file yet — tap “Generate pairing file” first.")
+        }
+        pairingFilePath = path
+        let ip = deviceIP
+        let device = try await onDeviceQueue { try self.performConnect(ip: ip, pairingPath: path) }
+        deviceSummary = device.summary
+        deviceUDID = device.udid
+        deviceName = device.name
+        pairingStatus = "connected"
+    }
+
+    /// Write `path` into `bundleID`'s Documents at `remoteRelativePath`, verifying
+    /// the read-back (the bundle-id-based sibling of `performWritePairing`, which
+    /// resolves the id from an `InstallSource`).
+    private func performInstallPairing(bundleID: String, remoteRelativePath: String, path: String) throws {
+        guard connection.isConnected else { throw EngineError.message("Device link dropped — reconnect.") }
+        let size = fileSize(path)
+        guard FileManager.default.fileExists(atPath: path), size > 0 else {
+            throw EngineError.message("Pairing file missing — generate it first.")
+        }
+        log("Writing pairing file into \(bundleID) /Documents/\(remoteRelativePath) …")
+        let written = try connection.writePairingFile(intoBundleID: bundleID,
+                                                       remoteRelativePath: remoteRelativePath,
+                                                       pairingFilePath: path)
+        log("Pairing file written into \(bundleID) and read-back VERIFIED (\(written) bytes).")
+    }
+
+    // MARK: 2FA bridge
+
+    /// Called from a Rust worker thread; blocks until the UI submits/cancels.
+    func provideTwoFactorCode(_ outBuf: UnsafeMutablePointer<CChar>, _ len: Int) -> Int32 {
+        setMain {
+            self.pendingTwoFactor = true
+            self.log("2FA required — enter the code from your trusted device.")
+        }
+        twoFactorSem.wait()
+        let code = twoFactorResult
+        twoFactorResult = nil
+        setMain { self.pendingTwoFactor = false }
+        guard let code, !code.isEmpty, len > 1 else { return 0 }
+        let bytes = Array(code.utf8.prefix(len - 1))
+        outBuf.withMemoryRebound(to: UInt8.self, capacity: len) { dst in
+            for (i, b) in bytes.enumerated() { dst[i] = b }
+            dst[bytes.count] = 0
+        }
+        return 1
+    }
+
+    func submitTwoFactor(_ code: String) {
+        twoFactorWasCancelled = false
+        twoFactorResult = code
+        twoFactorSem.signal()
+    }
+
+    func cancelTwoFactor() {
+        twoFactorWasCancelled = true
+        twoFactorResult = nil
+        twoFactorSem.signal()
+    }
+
+    // MARK: - Storage
+
+    private var storageDir: String {
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("isideload")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.path
+    }
+
+    // MARK: - Helpers
+
+    private func fileSize(_ path: String) -> Int {
+        ((try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? Int) ?? 0
+    }
+
+    private func fileExistsNonEmpty(_ path: String) -> Bool {
+        FileManager.default.fileExists(atPath: path) && fileSize(path) > 0
+    }
+
+    private func short(_ error: Error) -> String {
+        (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+    }
+
+    /// Bridge a blocking deviceQueue body to async.
+    private func onDeviceQueue<T>(_ work: @escaping () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { cont in
+            deviceQueue.async {
+                do { cont.resume(returning: try work()) }
+                catch { cont.resume(throwing: error) }
+            }
+        }
+    }
+
+    /// Bridge a blocking signQueue body to async.
+    private func onSignQueue<T>(_ work: @escaping () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { cont in
+            signQueue.async {
+                do { cont.resume(returning: try work()) }
+                catch { cont.resume(throwing: error) }
+            }
+        }
+    }
+
+    private func runInBackground(_ label: String, _ work: @escaping () -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            work()
+        }
+    }
+
+    /// Run a closure on the main queue (for @Published mutations off-thread).
+    func setMain(_ work: @escaping () -> Void) {
+        if Thread.isMainThread { work() } else { DispatchQueue.main.async(execute: work) }
+    }
+}
+
+// MARK: - Predefined instruction cards
+
+enum Guides {
+    static let wifi = Guide(
+        title: "ភ្ជាប់ Wi-Fi",
+        systemImage: "wifi",
+        steps: [
+            "បើក Settings › Wi-Fi ហើយចូលបណ្តាញមួយ។",
+            "តូណែលរបស់ LocalDevVPN — និងការដំឡើងទាំងមូល — ដំណើរការនៅលើ Wi-Fi។",
+            "បន្ទាប់មកត្រឡប់មកទីនេះវិញ — វានឹងបន្តដោយស្វ័យប្រវត្តិ។",
+        ],
+        actionLabel: nil, actionURLString: nil)
+
+    static let vpn = Guide(
+        title: "បើក LocalDevVPN",
+        systemImage: "network",
+        steps: [
+            "បើកកម្មវិធី LocalDevVPN (ដំឡើងវាសិន ប្រសិនបើអ្នកមិនទាន់មាន)។",
+            "ចុច Connect ដើម្បីបើកកុងតាក់។",
+            "ទុក Wi-Fi ឲ្យបើក ហើយត្រឡប់មកទីនេះវិញ — វានឹងបន្តដោយស្វ័យប្រវត្តិ។",
+        ],
+        actionLabel: "ទាញយក LocalDevVPN",
+        actionURLString: "https://apps.apple.com/app/id6755608044")
+
+    static let pairing = Guide(
+        title: "ភ្ជាប់ iPhone នេះនៅក្នុង Settings",
+        systemImage: "lock.iphone",
+        steps: [
+            "បើកកម្មវិធី Settings រួចទៅកាន់ Privacy & Security › Developer Mode។",
+            "ចុច “ភ្ជាប់ជាមួយ SideInstaller” (Pair with SideInstaller)។",
+            "បញ្ចូលលេខសម្ងាត់ iPhone របស់អ្នក ប្រសិនបើវាសួរ។",
+            "ត្រឡប់មកកម្មវិធី SideInstaller វិញ អានកូដដែលវាបង្ហាញ រួចវាយកូដដដែលនោះចូលក្នុងប្រអប់សួរនៅក្នុង Settings។",
+        ],
+        actionLabel: nil, actionURLString: nil)
+
+    static let certLimit = Guide(
+        title: "វិញ្ញាបនបត្រចុះហត្ថលេខាច្រើនពេក",
+        systemImage: "exclamationmark.shield",
+        steps: [
+            "Apple អនុញ្ញាតតែវិញ្ញាបនបត្រចុះហត្ថលេខា ៣ប៉ុណ្ណោះក្នុងមួយ Apple ID ហើយគណនីនេះមានគ្រប់ ៣ រួចហើយ — ជាធម្មតាមកពីការដំឡើង AltStore / SideStore លើឧបករណ៍ផ្សេងទៀត។",
+            "បើកផ្ទាំង Certificates នៅផ្នែកខាងក្រោមអេក្រង់ សូមប្រាកដថា Apple ID របស់អ្នកបានបំពេញរួច រួចចុច “ផ្ទុកវិញ្ញាបនបត្រ”។",
+            "ចុច “ដកហូត” លើវិញ្ញាបនបត្រចាស់ ឬផុតកំណត់ ដើម្បីដោះលែងកន្លែងទំនេរ។ ការដកហូតធ្វើឲ្យកម្មវិធីដែលបានចុះហត្ថលេខាដោយវិញ្ញាបនបត្រនោះឈប់ដំណើរការនៅលើឧបករណ៍ផ្សេងទៀត ដូច្នេះជ្រើសរើសមួយដែលអ្នកលែងប្រើ។",
+            "ត្រឡប់ទៅផ្ទាំង Install រួចចុច Install ម្តងទៀត។",
+            "ជាជម្រើសផ្សេង សូមចូលដោយ Apple ID ផ្សេង (ឬដែលនៅសល់) នៅខាងលើ រួចចុច Install ម្តងទៀត។",
+        ],
+        actionLabel: nil, actionURLString: nil)
+
+    /// Shown when the device UDID couldn't be registered with the developer
+    /// team before signing (Apple error 8220 / a registration rejection). The
+    /// UDID is included as its own step so it's easy to copy. The advice adapts
+    /// to a device-*limit* rejection, which a free account can't clear by
+    /// deleting devices (they don't reset until the membership year rolls over).
+    static func deviceRegistration(udid: String, raw: String) -> Guide {
+        var steps: [String] = []
+        if Engine.isDeviceLimitError(raw) {
+            steps.append("Apple ID របស់អ្នកបានដល់ដែនកំណត់នៃឧបករណ៍ដែលបានចុះឈ្មោះ។ គណនីឥតគិតថ្លៃអាចចុះឈ្មោះឧបករណ៍បានតែពីរបីគ្រឿងក្នុងមួយឆ្នាំ ហើយមិនអាចលុបចេញបានទេ រហូតដល់ឆ្នាំបានចាប់ផ្តើមឡើងវិញ។")
+            steps.append("វិធីងាយបំផុត៖ ដាក់ Apple ID ផ្សេង (ឬដែលនៅសល់) ចូលក្នុងប្រអប់ខាងលើ រួចចុច Install ម្តងទៀត។")
+        } else {
+            steps.append("SideInstaller មិនអាចបញ្ចូល iPhone នេះទៅក្នុងក្រុមអភិវឌ្ឍន៍របស់ Apple ID អ្នកបានទេ។ ការចុច Install ម្តងទៀតជាញឹកញាប់ដំណើរការ — សេវាកម្មអភិវឌ្ឍន៍របស់ Apple ពេលខ្លះមិនដំណើរការមួយភ្លែត។")
+        }
+        if !udid.isEmpty {
+            steps.append("ប្រសិនបើនៅតែបរាជ័យ សូមបន្ថែមឧបករណ៍ដោយដៃ។ UDID របស់វាគឺ៖")
+            steps.append(udid)
+            steps.append("បិទភ្ជាប់វាចូលក្នុងទម្រង់ “ចុះឈ្មោះឧបករណ៍” នៅក្នុង Apple Developer portal (ត្រូវការគណនី Apple Developer បង់ប្រាក់) រួចចុច Install ម្តងទៀត។")
+        }
+        return Guide(
+            title: "មិនអាចចុះឈ្មោះឧបករណ៍នេះបានទេ",
+            systemImage: "iphone.badge.exclamationmark",
+            steps: steps,
+            actionLabel: udid.isEmpty ? nil : "បើកបញ្ជីឧបករណ៍",
+            actionURLString: udid.isEmpty ? nil : "https://developer.apple.com/account/resources/devices/list")
+    }
+
+    static func trust(appName: String) -> Guide {
+        Guide(
+            title: "ជំហានចុងក្រោយ៖ ទុកចិត្ត \(appName)",
+            systemImage: "checkmark.seal",
+            steps: [
+                "បើក Settings › General › VPN & Device Management។",
+                "ចុច Apple ID របស់អ្នកនៅក្រោម “Developer App” រួចចុច Trust។",
+                "បើក \(appName) ពីអេក្រង់ដើមរបស់អ្នក — អ្នករួចរាល់ហើយ។",
+            ],
+            actionLabel: nil, actionURLString: nil)
+    }
+
+    /// Shown only after a LiveContainer + SideStore install: LiveContainer needs
+    /// SideStore's signing certificate, which you pull in from its settings.
+    static let liveContainerImport = Guide(
+        title: "នាំចូលវិញ្ញាបនបត្រទៅ LiveContainer",
+        systemImage: "arrow.down.doc",
+        steps: [
+            "បើក LiveContainer ពីអេក្រង់ដើមរបស់អ្នក។",
+            "ចុចផ្ទាំង Settings។",
+            "ចុច “នាំចូលវិញ្ញាបនបត្រពី SideStore” (Import Certificate From SideStore)។",
+        ],
+        actionLabel: nil, actionURLString: nil)
+}
+
+// MARK: - C logging callback
+
+/// Bare C function pointer (no captures) — forwards Rust log lines to the
+/// singleton engine on the main queue.
+private let siLogCallback: SILogCallback = { _, msg in
+    guard let msg = msg else { return }
+    let text = String(cString: msg)
+    DispatchQueue.main.async {
+        Engine.shared.appendRustLine(text)
+    }
+}
+
+/// Bare C function pointer — bridges isideload's 2FA request to the engine's
+/// blocking prompt. Runs on a Rust worker thread.
+private let twoFactorCallback: SITwoFactorCb = { _, outBuf, bufLen in
+    guard let outBuf = outBuf else { return 0 }
+    return Engine.shared.provideTwoFactorCode(outBuf, Int(bufLen))
+}

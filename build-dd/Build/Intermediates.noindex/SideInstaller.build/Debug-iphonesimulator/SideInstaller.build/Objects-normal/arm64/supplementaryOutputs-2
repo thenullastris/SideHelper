@@ -1,0 +1,23 @@
+{
+  "/Users/tommasodaddio/Desktop/SideInstaller/ios-app/ContentView.swift" : {
+    "const-values" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/ContentView.swiftconstvalues",
+    "dependencies" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/ContentView.d",
+    "diagnostics" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/ContentView.dia",
+    "object" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/ContentView.o",
+    "swift-dependencies" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/ContentView.swiftdeps"
+  },
+  "/Users/tommasodaddio/Desktop/SideInstaller/ios-app/DeviceConnection.swift" : {
+    "const-values" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/DeviceConnection.swiftconstvalues",
+    "dependencies" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/DeviceConnection.d",
+    "diagnostics" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/DeviceConnection.dia",
+    "object" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/DeviceConnection.o",
+    "swift-dependencies" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/DeviceConnection.swiftdeps"
+  },
+  "/Users/tommasodaddio/Desktop/SideInstaller/ios-app/DownloadsManager.swift" : {
+    "const-values" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/DownloadsManager.swiftconstvalues",
+    "dependencies" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/DownloadsManager.d",
+    "diagnostics" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/DownloadsManager.dia",
+    "object" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/DownloadsManager.o",
+    "swift-dependencies" : "/Users/tommasodaddio/Desktop/SideInstaller/build-dd/Build/Intermediates.noindex/SideInstaller.build/Debug-iphonesimulator/SideInstaller.build/Objects-normal/arm64/DownloadsManager.swiftdeps"
+  }
+}
