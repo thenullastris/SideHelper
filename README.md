@@ -1,3 +1,4 @@
+
 # SideInstaller (Khmer Localization Fork)
 
 > **🇰🇭 This fork is specifically maintained to add full Khmer (Cambodian) language support to SideInstaller.**  
@@ -8,7 +9,8 @@
 
 ## Install it [here](https://frizzlem.github.io/SideInstaller/)
 
-<img width="589" height="1209" alt="29EF8C23-3D7A-42CB-B95F-F1D11461442F_1_201_a" src="https://github.com/user-attachments/assets/600987fd-e294-4e6f-86ee-59a181bd2010" />
+<img width="589" height="1209" alt="Screenshot iPhone 17 Pro 16-07-2026 at 2 16 49 PM" src="https://github.com/user-attachments/assets/cb46bb76-6aff-4197-b4b7-addc0c5dca40" />
+
 
 SideStore and LiveContainer are currently the best way to sideload on iOS. However, there's one big problem: installing them requires a PC, which many people don't have. That's why I made SideInstaller, a free and open-source iOS app that installs them directly on your iPhone, no PC required.
 
